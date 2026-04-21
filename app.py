@@ -6,12 +6,17 @@ import io
 import os
 from datetime import datetime
 
+# Import S3 helper functions
+from s3_helper import upload_csv_to_s3, list_files_in_s3
+
+# Page Configuration
 st.set_page_config(
     page_title="E-Commerce Analytics Dashboard",
     page_icon="📊",
     layout="wide"
 )
 
+# Custom Styling
 st.markdown("""
 <style>
     .metric-card {
@@ -132,7 +137,7 @@ st.sidebar.image("https://img.icons8.com/color/96/combo-chart--v2.png", width=60
 st.sidebar.title("E-Commerce Analytics")
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Upload your data**")
-st.sidebar.caption("Supports CSV and Excel files from any e-commerce platform — Amazon, Flipkart, Shopify, WooCommerce, custom exports, etc.")
+st.sidebar.caption("Supports CSV and Excel files from any e-commerce platform.")
 st.sidebar.markdown("---")
 
 uploaded_file = st.sidebar.file_uploader(
@@ -153,7 +158,7 @@ if uploaded_file is None:
         st.markdown("### What this does")
         st.markdown("""
 - Upload **any** e-commerce CSV or Excel
-- Auto-detects your columns (sales, date, product, category etc.)
+- Auto-detects your columns
 - Generates **interactive charts**
 - Provides **AI-powered text summary**
 - Creates a **downloadable report**
@@ -161,12 +166,10 @@ if uploaded_file is None:
     with col2:
         st.markdown("### Works with")
         st.markdown("""
-- Amazon Seller Central exports
-- Flipkart seller reports
-- Shopify order exports
-- WooCommerce reports
-- Kaggle e-commerce datasets
-- Any custom sales CSV
+- Amazon / Flipkart exports
+- Shopify / WooCommerce
+- Kaggle datasets
+- Custom sales CSVs
         """)
     with col3:
         st.markdown("### Analysis includes")
@@ -175,7 +178,6 @@ if uploaded_file is None:
 - Product performance
 - Category breakdown
 - Regional analysis
-- Time-series trends
 - Statistical summary
         """)
 
@@ -183,7 +185,7 @@ if uploaded_file is None:
     st.info("Upload a file using the sidebar on the left to get started.")
 
 else:
-    # ─── LOAD DATA ──────────────────────────────────────────────
+    # ─── LOAD DATA & S3 UPLOAD ──────────────────────────────────
 
     try:
         if uploaded_file.name.endswith(".csv"):
@@ -193,6 +195,17 @@ else:
     except Exception as e:
         st.error(f"Could not read file: {e}")
         st.stop()
+
+    # --- AUTOMATIC S3 BACKUP ---
+    try:
+        success, key = upload_csv_to_s3(df, uploaded_file.name)
+        if success:
+            st.sidebar.success("✓ Backup saved to AWS S3!")
+        else:
+            st.sidebar.warning("App working locally (S3 upload failed)")
+    except Exception as s3_err:
+        pass  # Ensure the app keeps running even if S3 is down
+    # ---------------------------
 
     detected = detect_columns(df)
 
@@ -226,7 +239,7 @@ else:
             min_d = df_filtered[detected["date"]].min().date()
             max_d = df_filtered[detected["date"]].max().date()
             date_range = st.sidebar.date_input("Date range", [min_d, max_d])
-            if len(date_range) == 2:
+            if isinstance(date_range, list) and len(date_range) == 2:
                 df_filtered = df_filtered[
                     (df_filtered[detected["date"]].dt.date >= date_range[0]) &
                     (df_filtered[detected["date"]].dt.date <= date_range[1])
@@ -235,17 +248,20 @@ else:
             pass
 
     if "sales" in detected:
-        min_val = float(df[detected["sales"]].min())
-        max_val = float(df[detected["sales"]].max())
-        if min_val < max_val:
-            price_range = st.sidebar.slider(
-                "Price / Sales range",
-                min_val, max_val, (min_val, max_val)
-            )
-            df_filtered = df_filtered[
-                (df_filtered[detected["sales"]] >= price_range[0]) &
-                (df_filtered[detected["sales"]] <= price_range[1])
-            ]
+        try:
+            min_val = float(df[detected["sales"]].min())
+            max_val = float(df[detected["sales"]].max())
+            if min_val < max_val:
+                price_range = st.sidebar.slider(
+                    "Price / Sales range",
+                    min_val, max_val, (min_val, max_val)
+                )
+                df_filtered = df_filtered[
+                    (df_filtered[detected["sales"]] >= price_range[0]) &
+                    (df_filtered[detected["sales"]] <= price_range[1])
+                ]
+        except:
+            pass
 
     st.sidebar.markdown(f"**Showing {len(df_filtered):,} of {len(df):,} rows**")
 
@@ -278,7 +294,7 @@ else:
                 )
                 st.dataframe(det_df, use_container_width=True, hide_index=True)
             else:
-                st.warning("Could not auto-detect column types. Your columns: " + ", ".join(df.columns.tolist()))
+                st.warning("Could not auto-detect column types.")
 
         with col2:
             st.markdown("**Data types and missing values**")
@@ -299,10 +315,9 @@ else:
         st.subheader("Sales Analysis")
 
         if "sales" not in detected:
-            st.warning("No sales/revenue/price column detected. Please check your column names.")
+            st.warning("No sales/revenue column detected.")
         else:
             sales_col = detected["sales"]
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Revenue",  f"{df_filtered[sales_col].sum():,.2f}")
             c2.metric("Average Sale",   f"{df_filtered[sales_col].mean():,.2f}")
@@ -313,209 +328,62 @@ else:
 
             if "date" in detected:
                 try:
-                    df_filtered[detected["date"]] = pd.to_datetime(
-                        df_filtered[detected["date"]], errors="coerce"
-                    )
+                    df_filtered[detected["date"]] = pd.to_datetime(df_filtered[detected["date"]], errors="coerce")
                     monthly = (
                         df_filtered.groupby(
                             df_filtered[detected["date"]].dt.to_period("M").astype(str)
                         )[sales_col].sum().reset_index()
                     )
                     monthly.columns = ["Month", "Revenue"]
-                    fig = px.line(monthly, x="Month", y="Revenue",
-                                  title="Revenue Over Time",
-                                  markers=True)
-                    fig.update_layout(xaxis_tickangle=-45)
+                    fig = px.line(monthly, x="Month", y="Revenue", title="Revenue Over Time", markers=True)
                     st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.info(f"Could not plot time series: {e}")
+                except:
+                    pass
 
             col1, col2 = st.columns(2)
-
             with col1:
                 if "category" in detected:
-                    cat_sales = (
-                        df_filtered.groupby(detected["category"])[sales_col]
-                        .sum().sort_values(ascending=False).head(10).reset_index()
-                    )
+                    cat_sales = df_filtered.groupby(detected["category"])[sales_col].sum().sort_values(ascending=False).head(10).reset_index()
                     cat_sales.columns = ["Category", "Revenue"]
-                    fig2 = px.bar(cat_sales, x="Revenue", y="Category",
-                                  orientation="h",
-                                  title="Top 10 Categories by Revenue",
-                                  color="Revenue",
-                                  color_continuous_scale="Blues")
-                    fig2.update_layout(yaxis=dict(autorange="reversed"))
+                    fig2 = px.bar(cat_sales, x="Revenue", y="Category", orientation="h", title="Top 10 Categories")
                     st.plotly_chart(fig2, use_container_width=True)
-
             with col2:
                 if "region" in detected:
-                    reg_sales = (
-                        df_filtered.groupby(detected["region"])[sales_col]
-                        .sum().sort_values(ascending=False).head(10).reset_index()
-                    )
-                    reg_sales.columns = ["Region", "Revenue"]
-                    fig3 = px.pie(reg_sales, names="Region", values="Revenue",
-                                  title="Revenue by Region")
+                    reg_sales = df_filtered.groupby(detected["region"])[sales_col].sum().sort_values(ascending=False).head(10).reset_index()
+                    fig3 = px.pie(reg_sales, names=detected["region"], values=sales_col, title="Revenue by Region")
                     st.plotly_chart(fig3, use_container_width=True)
-                else:
-                    fig_dist = px.histogram(df_filtered, x=sales_col,
-                                            nbins=40,
-                                            title="Sales Distribution")
-                    st.plotly_chart(fig_dist, use_container_width=True)
-
-            if "quantity" in detected:
-                st.markdown("---")
-                col3, col4 = st.columns(2)
-                with col3:
-                    c1, c2 = st.columns(2)
-                    c1.metric("Total Units Sold", f"{df_filtered[detected['quantity']].sum():,.0f}")
-                    c2.metric("Avg Units/Order",  f"{df_filtered[detected['quantity']].mean():,.1f}")
-
-                with col4:
-                    if "category" in detected:
-                        qty_cat = (
-                            df_filtered.groupby(detected["category"])[detected["quantity"]]
-                            .sum().sort_values(ascending=False).head(8).reset_index()
-                        )
-                        qty_cat.columns = ["Category", "Quantity"]
-                        fig4 = px.bar(qty_cat, x="Category", y="Quantity",
-                                      title="Units Sold by Category",
-                                      color="Quantity",
-                                      color_continuous_scale="Greens")
-                        fig4.update_layout(xaxis_tickangle=-45)
-                        st.plotly_chart(fig4, use_container_width=True)
 
     # ── TAB 3: PRODUCT ANALYSIS ──────────────────────────────────
     with tab3:
         st.subheader("Product Analysis")
-
-        if "product" not in detected and "category" not in detected:
-            st.warning("No product or category column detected.")
-        else:
-            if "product" in detected and "sales" in detected:
-                top_products = (
-                    df_filtered.groupby(detected["product"])[detected["sales"]]
-                    .sum().sort_values(ascending=False).head(15).reset_index()
-                )
-                top_products.columns = ["Product", "Revenue"]
-                fig = px.bar(top_products, x="Product", y="Revenue",
-                             title="Top 15 Products by Revenue",
-                             color="Revenue",
-                             color_continuous_scale="Teal")
-                fig.update_layout(xaxis_tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                if "category" in detected:
-                    cat_count = (
-                        df_filtered[detected["category"]]
-                        .value_counts().head(12).reset_index()
-                    )
-                    cat_count.columns = ["Category", "Count"]
-                    fig2 = px.pie(cat_count, names="Category", values="Count",
-                                  title="Orders by Category")
-                    st.plotly_chart(fig2, use_container_width=True)
-
-            with col2:
-                if "sales" in detected:
-                    fig3 = px.box(df_filtered, y=detected["sales"],
-                                  x=detected.get("category"),
-                                  title="Price Distribution by Category" if "category" in detected else "Price Distribution")
-                    fig3.update_layout(xaxis_tickangle=-45)
-                    st.plotly_chart(fig3, use_container_width=True)
-
-            if "profit" in detected and "sales" in detected:
-                st.markdown("---")
-                st.markdown("**Profit vs Revenue**")
-                fig4 = px.scatter(
-                    df_filtered,
-                    x=detected["sales"],
-                    y=detected["profit"],
-                    color=detected.get("category"),
-                    title="Profit vs Revenue",
-                    opacity=0.6
-                )
-                st.plotly_chart(fig4, use_container_width=True)
+        if "product" in detected and "sales" in detected:
+            top_products = df_filtered.groupby(detected["product"])[detected["sales"]].sum().sort_values(ascending=False).head(15).reset_index()
+            fig = px.bar(top_products, x=detected["product"], y=detected["sales"], title="Top 15 Products by Revenue")
+            st.plotly_chart(fig, use_container_width=True)
 
     # ── TAB 4: AI SUMMARY ────────────────────────────────────────
     with tab4:
         st.subheader("AI-Generated Analysis Summary")
-        st.caption("Intelligent summary auto-generated from your data")
-
         summary_lines = smart_summary(df_filtered, detected)
-
-        st.markdown("### Key Findings")
         for line in summary_lines:
             st.markdown(f"- {line}")
 
         st.markdown("---")
-        st.markdown("### Statistical Summary")
         numeric_cols = df_filtered.select_dtypes(include="number")
         if not numeric_cols.empty:
+            st.markdown("### Statistical Summary")
             st.dataframe(numeric_cols.describe().round(2), use_container_width=True)
-
-        st.markdown("---")
-        st.markdown("### Data Quality Report")
-        quality = pd.DataFrame({
-            "Column": df_filtered.columns,
-            "Missing Count": df_filtered.isnull().sum().values,
-            "Missing %": (df_filtered.isnull().sum().values / len(df_filtered) * 100).round(1),
-            "Unique Values": df_filtered.nunique().values,
-            "Data Type": df_filtered.dtypes.astype(str).values
-        })
-        st.dataframe(quality, use_container_width=True, hide_index=True)
-
-        if "sales" in detected and "category" in detected:
-            st.markdown("---")
-            st.markdown("### Top Insights")
-            cat_rev = df_filtered.groupby(detected["category"])[detected["sales"]].sum()
-            top3    = cat_rev.sort_values(ascending=False).head(3)
-            total   = cat_rev.sum()
-            st.markdown(f"- Top 3 categories contribute **{(top3.sum()/total*100):.1f}%** of total revenue")
-            st.markdown(f"- Best performing category: **{top3.index[0]}** with revenue of **{top3.iloc[0]:,.2f}**")
-            st.markdown(f"- Total categories in dataset: **{cat_rev.shape[0]}**")
 
     # ── TAB 5: DOWNLOAD REPORT ───────────────────────────────────
     with tab5:
         st.subheader("Download Your Report")
-
         summary_lines = smart_summary(df_filtered, detected)
         report_text   = generate_pdf_report(df_filtered, detected, summary_lines, {})
 
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.markdown("**Text Report (.txt)**")
-            st.download_button(
-                label="Download Text Report",
-                data=report_text,
-                file_name=f"ecommerce_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain"
-            )
-
-        with col2:
-            st.markdown("**Filtered Data (.csv)**")
-            csv_data = df_filtered.to_csv(index=False)
-            st.download_button(
-                label="Download Filtered CSV",
-                data=csv_data,
-                file_name=f"filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-
-        with col3:
-            st.markdown("**Full Dataset (.csv)**")
-            full_csv = df.to_csv(index=False)
-            st.download_button(
-                label="Download Full Dataset",
-                data=full_csv,
-                file_name=f"full_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-
-        st.markdown("---")
-        st.markdown("**Report Preview**")
-        st.text(report_text[:2000] + "\n... (truncated for preview)")
-
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button("Download Text Report", data=report_text, file_name="report.txt")
+        with c2:
+            st.download_button("Download Filtered CSV", data=df_filtered.to_csv(index=False), file_name="filtered.csv")
+        with c3:
+            st.download_button("Download Full CSV", data=df.to_csv(index=False), file_name="full_data.csv")
